@@ -60,14 +60,31 @@ into plain rejection-sampling SFT — the natural ablation.
 
 **(4. Optional)** continue with standard GRPO on the student (`student-rl` stage).
 
-## Setup for the PoC
+## Presets / experimental regimes
 
-| | |
-|---|---|
-| Model | `Qwen/Qwen2.5-0.5B-Instruct` (student = frozen base, teacher = base + LoRA) |
-| Task | GSM8K (256 train problems, 200 test problems) |
-| Privileged info | gold final answer in the teacher's system prompt (`--set privileged=solution` for the full reference solution) |
-| Hardware | one Colab GPU — T4 works, A100/L4 is ~4× faster |
+| preset | model | problems | regime | hardware |
+|---|---|---|---|---|
+| `smoke` | Qwen2.5-0.5B-Instruct | 16 | pipeline check (~10 min) | T4 |
+| `poc` | Qwen2.5-0.5B-Instruct | 256 random GSM8K | **dense rewards** (student pass@1 ≈ 0.43) | T4 (~2–3 h) |
+| `hard` | Llama-3.2-3B-Instruct | GSM8K hard tail (student fails 0/k) | **sparse rewards** — the method's target regime | A100 (~4–5 h) |
+
+Round-1 finding (see [RESULTS.md](RESULTS.md)): in the dense-reward `poc` regime
+the *mechanism* works (surprisal falls, `G_spike` ~doubles, correctness holds)
+but eval doesn't move and vanilla GRPO wins at matched rollouts — privileged
+teaching has no edge when blind sampling already finds correct trajectories.
+The `hard` preset reconstructs the blog's sparse regime: `filter-hard` keeps
+only problems the base student fails at all of `hard_k` samples, and every eval
+also reports a held-out **hard slice** (`eval_*_hard.json`), where the effect
+must appear first.
+
+Privileged info: the gold final answer in the teacher's system prompt, stated
+directly ("use it as a hint … land on this answer"); `--set privileged=solution`
+hands over the full reference solution instead — the fallback when the model is
+too small to exploit a bare answer (see RESULTS.md round 1).
+
+> `meta-llama` models are gated: accept the license at
+> huggingface.co/meta-llama/Llama-3.2-3B-Instruct and set `HF_TOKEN`.
+> Ungated alternative: `--set model_name=Qwen/Qwen2.5-1.5B-Instruct`.
 
 ## Quickstart
 
@@ -77,20 +94,31 @@ pip install -r requirements.txt
 # ~10 min end-to-end pipeline check on a T4
 python run.py all --preset smoke
 
-# the real proof of concept (~2–3 h on T4, ~40 min on A100)
+# dense-reward proof of concept (~2–3 h on T4, ~40 min on A100)
 python run.py all --preset poc
+
+# the real test — sparse-reward hard subset on A100
+# (runs filter-hard automatically, writes to outputs_hard/)
+python run.py all --preset hard
+python run.py baseline-rl --preset hard      # vanilla GRPO should STALL here
+python run.py curve-baseline --preset hard   # both curves eval on the hard slice
+python run.py curve-pedrl --preset hard
 ```
 
 `run.py all` executes, each in its own process (so GPU memory is released
 between stages):
 
-1. `eval-base` — baseline student pass@1
-2. `teacher` — GRPO on the privileged teacher with reward `R · G_spike`
-3. `corpus` — sample the teacher, filter to correct, rank by `G_spike`
-4. `assimilate` — surprisal-gated distillation into a fresh student LoRA
-5. `eval-student` — student pass@1 after assimilation
+1. `filter-hard` (hard preset only) — screen problems the base student fails 0/k;
+   writes `hard_train.json` + a held-out `hard_test.json` eval slice
+2. `eval-base` — baseline student pass@1 (plus hard slice in hard mode)
+3. `teacher` — GRPO on the privileged teacher with reward `R · G_spike`
+4. `corpus` — sample the teacher, filter to correct, rank by `G_spike`
+5. `assimilate` — surprisal-gated distillation into a fresh student LoRA
+6. `eval-student` — student pass@1 after assimilation (plus hard slice)
 
-Compare `outputs/eval_base.json` vs `outputs/eval_student.json`.
+Compare `eval_base.json` vs `eval_student.json` (and `eval_base_hard.json` vs
+`eval_student_hard.json` in hard mode) in the preset's output dir
+(`outputs/` for smoke/poc, `outputs_hard/` for hard).
 
 ### Analysis: surprisal & sample efficiency
 
@@ -143,15 +171,17 @@ smoke test, then the PoC.
 
 ```
 run.py                  # CLI: stages + presets + config overrides
+RESULTS.md              # experiment log: round-1 findings, round-2 design
 pedrl/
-├── config.py           # every knob in one dataclass (smoke/poc presets)
+├── config.py           # every knob in one dataclass (smoke/poc/hard presets)
 ├── data.py             # GSM8K, student vs privileged-teacher prompts, answer checking
+├── hardset.py          # filter-hard: build the sparse-reward hard subset
 ├── surprisal.py        # d_t gaps and G_spike (scored under the student)
 ├── rewards.py          # r_ped = correctness × G_spike (GRPO reward function)
-├── teacher.py          # stage 1 (and optional stage 3) — TRL GRPOTrainer
+├── teacher.py          # stage 1 (and baseline-rl / stage 3) — TRL GRPOTrainer
 ├── distill.py          # stage 2 — corpus building + gated assimilation Trainer
 ├── modeling.py         # loading, LoRA config, batched generation
-└── evaluate.py         # greedy pass@1 on GSM8K test
+└── evaluate.py         # greedy pass@1 on GSM8K test (standard + hard slice)
 PedRL_colab.ipynb       # Colab driver notebook
 ```
 
@@ -166,8 +196,11 @@ PedRL_colab.ipynb       # Colab driver notebook
 | `num_generations` | 8 | GRPO group size |
 | `teacher_steps` | 120 | GRPO steps for the teacher |
 | `privileged` | `answer` | what the teacher sees: `answer` or `solution` |
+| `teacher_system` | — | custom hint prompt template (`{answer}` / `{solution}` placeholder) |
 | `checkpoint_every` | 30 | adapter snapshot cadence for learning curves (0 = off) |
 | `curve_n_distill` / `curve_n_eval` | 128 / 100 | reduced sizes for curve points |
+| `hard_pool` / `hard_test_pool` | 768 / 400 | problems screened by `filter-hard` |
+| `hard_k` | 4 | hard = base student fails all k samples |
 
 GRPO normalizes advantages within each group, so only the *relative* ordering
 of `r_ped` within a group matters — the absolute scale of `λ` is forgiving.
@@ -188,11 +221,15 @@ of `r_ped` within a group matters — the absolute scale of `λ` is forgiving.
 
 ## Caveats
 
-This is a proof of concept, not a reproduction: the blog uses Llama-3.2-3B on
-a hard MATH subset with iterated teacher/student updates; we use a 0.5B model
-on GSM8K with a single teacher→student round to fit free Colab compute. The
-blog does not publish all hyperparameters (β = 5 appears in an example; λ, κ,
-γ here are chosen to give sensible gate/score ranges for a 0.5B model).
+This is a proof of concept, not a reproduction. The blog uses Llama-3.2-3B on a
+hard MATH subset with *iterated* teacher/student rounds; our `hard` preset
+matches the model and reconstructs the sparse regime from GSM8K's hard tail,
+but still runs a single teacher→student round. The `poc` preset (0.5B, random
+GSM8K) is deliberately kept as the dense-reward contrast — see RESULTS.md for
+why that regime shows the mechanism but not eval gains. The blog does not
+publish all hyperparameters (β = 5 appears in an example; λ, κ, γ here are
+chosen to give sensible gate/score ranges) and does not report teacher
+hint-compliance or vanilla-RL baselines, which we measure.
 
 ## References
 

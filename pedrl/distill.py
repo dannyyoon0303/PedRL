@@ -49,7 +49,8 @@ def build_corpus(cfg: PedRLConfig) -> str:
 
     set_seed(cfg.seed)
     tokenizer = load_tokenizer(cfg.model_name)
-    ds = load_gsm8k(cfg, tokenizer, split="train", n=cfg.n_distill)
+    ds = load_gsm8k(cfg, tokenizer, split="train", n=cfg.n_distill,
+                    filter_path=cfg.train_filter)
 
     # teacher_adapter_dir == "none" means the untrained (base) model acts as the
     # privileged teacher — the rejection-sampling baseline / step-0 curve point

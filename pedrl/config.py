@@ -31,6 +31,17 @@ class PedRLConfig:
     n_distill: int = 256          # problems used to build the assimilation corpus
     n_eval: int = 200             # test problems for evaluation
     privileged: str = "answer"    # "answer" | "solution" — what the teacher gets to see
+    teacher_system: str = ""      # custom teacher system prompt (must contain {answer} or {solution})
+
+    # ---- hard-subset mode (the regime the method is designed for) ----
+    # filter-hard keeps only problems the BASE student fails at all of k samples,
+    # so on-policy RL reward is sparse by construction and teacher demos carry
+    # information the student does not already have.
+    use_hard_set: bool = False
+    hard_pool: int = 768          # train problems screened by filter-hard
+    hard_test_pool: int = 400     # test problems screened for the held-out hard eval slice
+    hard_k: int = 4               # student samples per problem; hard = 0/k correct
+    n_eval_hard: int = 100        # eval problems from the hard test slice (capped by availability)
 
     # ---- shared generation ----
     max_prompt_length: int = 512
@@ -84,6 +95,9 @@ class PedRLConfig:
     distill_corpus_path: str = ""
     eval_adapter_dir: str = ""      # for the eval-adapter stage
     eval_tag: str = ""              # output name for the eval-adapter stage
+    eval_filter_path: str = ""      # for the eval-adapter stage: restrict eval to a hard-set file
+    hard_train_path: str = ""
+    hard_test_path: str = ""
 
     def finalize(self) -> "PedRLConfig":
         """Fill in any path left empty. Call after all overrides are applied."""
@@ -95,7 +109,16 @@ class PedRLConfig:
             self.student_adapter_dir = os.path.join(self.output_dir, name)
         if not self.distill_corpus_path:
             self.distill_corpus_path = os.path.join(self.output_dir, "distill_corpus.jsonl")
+        if not self.hard_train_path:
+            self.hard_train_path = os.path.join(self.output_dir, "hard_train.json")
+        if not self.hard_test_path:
+            self.hard_test_path = os.path.join(self.output_dir, "hard_test.json")
         return self
+
+    @property
+    def train_filter(self):
+        """Hard-set filter applied to train-split loading (None when disabled)."""
+        return self.hard_train_path if self.use_hard_set else None
 
     @property
     def rollouts_per_step(self) -> int:
@@ -123,8 +146,33 @@ def filter_kwargs_for_dataclass(cls, kwargs: dict, label: str = "") -> dict:
 
 
 def apply_preset(cfg: PedRLConfig, preset: Optional[str]) -> PedRLConfig:
-    """Presets: 'smoke' verifies the full pipeline in minutes; 'poc' is the real run."""
+    """Presets:
+    - smoke: verifies the full pipeline in minutes (T4)
+    - poc:   dense-reward run on full GSM8K, 0.5B model (T4/A100)
+    - hard:  the regime the method targets — hard-subset GSM8K, Llama-3.2-3B (A100)
+    """
     if preset in (None, "poc"):
+        return cfg
+    if preset == "hard":
+        # Faithful to the blog: a model NOT math-mid-trained (they explicitly avoided
+        # Qwen), on problems the student fails, answer-only privilege.
+        # NOTE: meta-llama models are gated — accept the license on huggingface.co
+        # and set HF_TOKEN. Ungated fallback: --set model_name=Qwen/Qwen2.5-1.5B-Instruct
+        cfg.model_name = "meta-llama/Llama-3.2-3B-Instruct"
+        cfg.output_dir = "outputs_hard"
+        cfg.use_hard_set = True
+        cfg.n_train = 128
+        cfg.n_distill = 128
+        cfg.n_eval = 200
+        cfg.teacher_steps = 100
+        cfg.checkpoint_every = 25
+        cfg.max_completion_length = 512
+        cfg.eval_max_new_tokens = 640
+        cfg.distill_samples_per_problem = 6
+        cfg.curve_n_distill = 96
+        cfg.curve_n_eval = 100
+        cfg.gen_batch_size = 24
+        cfg.eval_batch_size = 24
         return cfg
     if preset == "smoke":
         cfg.n_train = 16

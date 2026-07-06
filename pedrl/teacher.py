@@ -42,7 +42,8 @@ def train_teacher(cfg: PedRLConfig, pedagogical: bool = True,
 
     set_seed(cfg.seed)
     tokenizer = load_tokenizer(cfg.model_name)
-    dataset = load_gsm8k(cfg, tokenizer, split="train", n=cfg.n_train)
+    dataset = load_gsm8k(cfg, tokenizer, split="train", n=cfg.n_train,
+                         filter_path=cfg.train_filter)
     if not pedagogical:
         # student RL / baseline RL: prompt the model with the student's own context
         dataset = dataset.map(lambda ex: {"prompt": ex["student_prompt"]})

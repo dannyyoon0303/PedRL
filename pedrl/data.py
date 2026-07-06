@@ -20,20 +20,21 @@ USER_TEMPLATE = (
     "answer in \\boxed{{}}.\n\n{question}"
 )
 
+# Direct, task-shaped hint prompts. The prompt maximizes USE of the privileged
+# information; sounding natural / not leaking it is the surprisal reward's job,
+# not the prompt's (see round-1 findings in RESULTS.md).
 TEACHER_SYSTEM_ANSWER = (
-    "You are a teacher writing a worked solution for a student. You secretly know "
-    "the correct final answer: {answer}. Write the solution exactly the way a "
-    "capable student would discover it on their own: reason step by step in a "
-    "natural way, never mention that you were given the answer, and end with the "
-    "final answer in \\boxed{{}}."
+    "The correct final answer to this problem is: {answer}. Use it as a hint. "
+    "Solve the problem step by step, choosing steps that genuinely lead to this "
+    "answer, and end with the final answer in \\boxed{{}}. Do not mention that "
+    "you were given the answer."
 )
 
 TEACHER_SYSTEM_SOLUTION = (
-    "You are a teacher writing a worked solution for a student. You secretly know "
-    "a correct reference solution:\n---\n{solution}\n---\n"
-    "Write the solution exactly the way a capable student would discover it on "
-    "their own: reason step by step in a natural way, never mention the reference, "
-    "and end with the final answer in \\boxed{{}}."
+    "Here is a correct solution to this problem:\n---\n{solution}\n---\n"
+    "Use it as a hint. Write your own step-by-step solution in your natural "
+    "style, following the same reasoning, and end with the final answer in "
+    "\\boxed{{}}. Do not mention that you were given a solution."
 )
 
 
@@ -91,7 +92,8 @@ def answers_match(pred: Optional[str], gold: str) -> bool:
         return False
 
 
-def build_prompts(tokenizer, question: str, answer: str, solution: str, privileged: str):
+def build_prompts(tokenizer, question: str, answer: str, solution: str, privileged: str,
+                  teacher_system: str = ""):
     """Returns (student_prompt, teacher_prompt) as fully chat-templated strings."""
     user_msg = {"role": "user", "content": USER_TEMPLATE.format(question=question)}
 
@@ -101,7 +103,9 @@ def build_prompts(tokenizer, question: str, answer: str, solution: str, privileg
         add_generation_prompt=True,
     )
 
-    if privileged == "solution":
+    if teacher_system:
+        sys_content = teacher_system.format(answer=answer, solution=solution)
+    elif privileged == "solution":
         sys_content = TEACHER_SYSTEM_SOLUTION.format(solution=solution)
     else:
         sys_content = TEACHER_SYSTEM_ANSWER.format(answer=answer)
@@ -113,19 +117,34 @@ def build_prompts(tokenizer, question: str, answer: str, solution: str, privileg
     return student_prompt, teacher_prompt
 
 
-def load_gsm8k(cfg, tokenizer, split: str, n: int, seed: Optional[int] = None):
+def load_gsm8k(cfg, tokenizer, split: str, n: int, seed: Optional[int] = None,
+               filter_path: Optional[str] = None):
     """Returns a datasets.Dataset with columns:
     question, answer (gold numeric string), prompt (teacher), student_prompt.
+
+    filter_path: optional hard-set file (from the filter-hard stage) holding
+    indices into the seed-shuffled split; restricts loading to those problems.
     """
+    import json
+    import os
+
     ds = load_dataset(cfg.dataset_name, cfg.dataset_config, split=split)
     ds = ds.shuffle(seed=cfg.seed if seed is None else seed)
+    if filter_path:
+        if not os.path.exists(filter_path):
+            raise FileNotFoundError(
+                f"hard-set file {filter_path} not found — run `python run.py filter-hard` first"
+            )
+        with open(filter_path) as f:
+            ds = ds.select(json.load(f)["indices"])
     if n > 0:
         ds = ds.select(range(min(n, len(ds))))
 
     def _map(ex):
         gold = gsm8k_gold_answer(ex["answer"])
         student_prompt, teacher_prompt = build_prompts(
-            tokenizer, ex["question"], gold, ex["answer"], cfg.privileged
+            tokenizer, ex["question"], gold, ex["answer"], cfg.privileged,
+            teacher_system=cfg.teacher_system,
         )
         return {
             "question": ex["question"],
