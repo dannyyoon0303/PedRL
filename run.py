@@ -1,29 +1,42 @@
 #!/usr/bin/env python
 """PedRL pipeline runner.
 
-Stages (run each in its own process so GPU memory is fully released between them):
+Stages (each runs in its own process so GPU memory is fully released between them):
 
-  python run.py eval-base   [--preset smoke|poc]   # baseline student pass@1
-  python run.py teacher     [--preset ...]         # stage 1: GRPO pedagogical teacher
-  python run.py corpus      [--preset ...]         # stage 2a: sample teacher, filter, rank by G_spike
-  python run.py assimilate  [--preset ...]         # stage 2b: surprisal-gated distillation
-  python run.py eval-student[--preset ...]         # student pass@1 after assimilation
-  python run.py student-rl  [--preset ...]         # optional stage 3: plain GRPO on the student
-  python run.py all         [--preset ...]         # eval-base -> teacher -> corpus -> assimilate -> eval-student
+  python run.py eval-base      [--preset smoke|poc]  # baseline student pass@1
+  python run.py teacher        [--preset ...]        # stage 1: GRPO pedagogical teacher
+  python run.py corpus         [--preset ...]        # stage 2a: sample teacher, filter, rank by G_spike
+  python run.py assimilate     [--preset ...]        # stage 2b: surprisal-gated distillation
+  python run.py eval-student   [--preset ...]        # student pass@1 after assimilation
+  python run.py all            [--preset ...]        # the five stages above, in order
+
+Analysis / baselines:
+
+  python run.py baseline-rl    [--preset ...]  # vanilla GRPO on the student, SAME rollout
+                                               # budget as the teacher — the sample-efficiency baseline
+  python run.py curve-pedrl    [--preset ...]  # eval accuracy vs teacher rollouts: for each teacher
+                                               # checkpoint, corpus -> assimilate -> eval
+  python run.py curve-baseline [--preset ...]  # eval accuracy vs rollouts for vanilla GRPO checkpoints
+  python run.py student-rl     [--preset ...]  # optional stage 3: plain GRPO on the assimilated student
+  python run.py eval-adapter --set eval_adapter_dir=... --set eval_tag=...
 
 Ablation: add --no-gating to `assimilate` for plain rejection-sampling SFT.
 Any PedRLConfig field can be overridden with --set key=value (repeatable).
 """
 
 import argparse
-import dataclasses
+import json
 import os
+import re
 import subprocess
 import sys
 
 from pedrl.config import PedRLConfig, apply_preset
 
-STAGES = ["eval-base", "teacher", "corpus", "assimilate", "eval-student", "student-rl", "all"]
+STAGES = [
+    "eval-base", "teacher", "corpus", "assimilate", "eval-student", "all",
+    "baseline-rl", "student-rl", "eval-adapter", "curve-pedrl", "curve-baseline",
+]
 
 
 def parse_args():
@@ -37,13 +50,15 @@ def parse_args():
 
 
 def build_config(args) -> PedRLConfig:
+    import dataclasses
+
     cfg = apply_preset(PedRLConfig(), args.preset)
     if args.no_gating:
         cfg.gating = False
-    field_types = {f.name: f.type for f in dataclasses.fields(PedRLConfig)}
+    field_names = {f.name for f in dataclasses.fields(PedRLConfig)}
     for kv in args.set:
         key, _, value = kv.partition("=")
-        if key not in field_types:
+        if key not in field_names:
             raise SystemExit(f"unknown config field: {key}")
         current = getattr(cfg, key)
         if isinstance(current, bool):
@@ -54,8 +69,101 @@ def build_config(args) -> PedRLConfig:
             setattr(cfg, key, float(value))
         else:
             setattr(cfg, key, value)
-    return cfg
+    return cfg.finalize()
 
+
+# ---------------------------------------------------------------------------
+# orchestration helpers (parent process; heavy work runs in subprocesses)
+# ---------------------------------------------------------------------------
+
+def _sub(args, stage: str, extra_sets=()):
+    cmd = [sys.executable, __file__, stage, "--preset", args.preset]
+    if args.no_gating:
+        cmd.append("--no-gating")
+    for kv in list(args.set) + list(extra_sets):
+        cmd += ["--set", kv]
+    print(f"\n{'=' * 60}\n>>> {' '.join(cmd[1:])}\n{'=' * 60}")
+    subprocess.run(cmd, check=True)
+
+
+def list_checkpoints(root: str):
+    """[(step, path)] for step_NNNN dirs, sorted by step."""
+    if not os.path.isdir(root):
+        return []
+    out = []
+    for name in os.listdir(root):
+        m = re.fullmatch(r"step_(\d+)", name)
+        if m:
+            out.append((int(m.group(1)), os.path.join(root, name)))
+    return sorted(out)
+
+
+def _read_acc(cfg, tag: str):
+    path = os.path.join(cfg.output_dir, f"eval_{tag}.json")
+    with open(path) as f:
+        return json.load(f)["accuracy"]
+
+
+def _write_curve(cfg, name: str, points):
+    path = os.path.join(cfg.output_dir, f"curve_{name}.json")
+    with open(path, "w") as f:
+        json.dump({"rollouts_per_step": cfg.rollouts_per_step, "points": points}, f, indent=2)
+    print(f"\n[curve:{name}]")
+    for pt in points:
+        print(f"  step {pt['step']:>4}  rollouts {pt['rollouts']:>5}  pass@1 = {pt['accuracy']:.3f}")
+    print(f"-> {path}")
+
+
+def curve_baseline(args, cfg):
+    """Eval accuracy vs rollouts for the vanilla-GRPO baseline checkpoints."""
+    ckpts = list_checkpoints(os.path.join(cfg.output_dir, "baseline_adapter_checkpoints"))
+    if not ckpts:
+        raise SystemExit("no baseline checkpoints found — run `baseline-rl` first")
+    points = []
+    base_eval = os.path.join(cfg.output_dir, "eval_base.json")
+    if os.path.exists(base_eval):
+        with open(base_eval) as f:
+            points.append({"step": 0, "rollouts": 0, "accuracy": json.load(f)["accuracy"]})
+    for step, path in ckpts:
+        tag = f"baseline_step{step}"
+        _sub(args, "eval-adapter", [
+            f"eval_adapter_dir={path}", f"eval_tag={tag}", f"n_eval={cfg.curve_n_eval}",
+        ])
+        points.append({"step": step, "rollouts": step * cfg.rollouts_per_step,
+                       "accuracy": _read_acc(cfg, tag)})
+    _write_curve(cfg, "baseline", points)
+
+
+def curve_pedrl(args, cfg):
+    """Eval accuracy vs TEACHER rollouts: distill a student from each teacher
+    checkpoint (plus the untrained teacher at step 0) and evaluate it."""
+    ckpts = list_checkpoints(cfg.teacher_adapter_dir + "_checkpoints")
+    if not ckpts:
+        raise SystemExit("no teacher checkpoints found — run `teacher` first")
+    curve_dir = os.path.join(cfg.output_dir, "curve")
+    points = []
+    for step, adapter in [(0, "none")] + ckpts:
+        tag = f"pedrl_step{step}"
+        corpus = os.path.join(curve_dir, f"corpus_step{step}.jsonl")
+        student = os.path.join(curve_dir, f"student_step{step}")
+        _sub(args, "corpus", [
+            f"teacher_adapter_dir={adapter}", f"distill_corpus_path={corpus}",
+            f"n_distill={cfg.curve_n_distill}",
+        ])
+        _sub(args, "assimilate", [
+            f"distill_corpus_path={corpus}", f"student_adapter_dir={student}",
+        ])
+        _sub(args, "eval-adapter", [
+            f"eval_adapter_dir={student}", f"eval_tag={tag}", f"n_eval={cfg.curve_n_eval}",
+        ])
+        points.append({"step": step, "rollouts": step * cfg.rollouts_per_step,
+                       "accuracy": _read_acc(cfg, tag)})
+    _write_curve(cfg, "pedrl", points)
+
+
+# ---------------------------------------------------------------------------
+# stages
+# ---------------------------------------------------------------------------
 
 def run_stage(stage: str, cfg: PedRLConfig):
     if stage == "eval-base":
@@ -74,6 +182,19 @@ def run_stage(stage: str, cfg: PedRLConfig):
         from pedrl.evaluate import evaluate
         tag = "student" if cfg.gating else "student_sft_ablation"
         evaluate(cfg, adapter_dir=cfg.student_adapter_dir, tag=tag)
+    elif stage == "eval-adapter":
+        from pedrl.evaluate import evaluate
+        adapter = cfg.eval_adapter_dir or None
+        evaluate(cfg, adapter_dir=adapter, tag=cfg.eval_tag or "adapter")
+    elif stage == "baseline-rl":
+        # vanilla GRPO from the base model, correctness-only reward, no privileged
+        # info — matched to the teacher's rollout budget for a fair comparison
+        from pedrl.teacher import train_teacher
+        from pedrl.evaluate import evaluate
+        out = os.path.join(cfg.output_dir, "baseline_adapter")
+        train_teacher(cfg, pedagogical=False, save_dir=out,
+                      max_steps=cfg.teacher_steps, log_name="baseline")
+        evaluate(cfg, adapter_dir=out, tag="baseline_rl")
     elif stage == "student-rl":
         from pedrl.teacher import train_teacher
         from pedrl.evaluate import evaluate
@@ -91,13 +212,12 @@ def main():
     cfg.save(os.path.join(cfg.output_dir, "config.json"))
 
     if args.stage == "all":
-        # run each stage as a subprocess so GPU memory is released between stages
-        passthrough = ["--preset", args.preset] + sum([["--set", kv] for kv in args.set], [])
-        if args.no_gating:
-            passthrough.append("--no-gating")
         for stage in ["eval-base", "teacher", "corpus", "assimilate", "eval-student"]:
-            print(f"\n{'=' * 60}\n>>> stage: {stage}\n{'=' * 60}")
-            subprocess.run([sys.executable, __file__, stage] + passthrough, check=True)
+            _sub(args, stage)
+    elif args.stage == "curve-baseline":
+        curve_baseline(args, cfg)
+    elif args.stage == "curve-pedrl":
+        curve_pedrl(args, cfg)
     else:
         run_stage(args.stage, cfg)
 

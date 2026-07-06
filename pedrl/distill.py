@@ -45,12 +45,22 @@ from .surprisal import score_completions
 # --------------------------------------------------------------------------
 
 def build_corpus(cfg: PedRLConfig) -> str:
+    import contextlib
+
     set_seed(cfg.seed)
     tokenizer = load_tokenizer(cfg.model_name)
     ds = load_gsm8k(cfg, tokenizer, split="train", n=cfg.n_distill)
 
-    model = load_model(cfg.model_name, adapter_dir=cfg.teacher_adapter_dir)
+    # teacher_adapter_dir == "none" means the untrained (base) model acts as the
+    # privileged teacher — the rejection-sampling baseline / step-0 curve point
+    adapter = cfg.teacher_adapter_dir
+    if adapter.lower() == "none":
+        adapter = None
+    model = load_model(cfg.model_name, adapter_dir=adapter)
     model.eval()
+
+    def student_ctx():
+        return model.disable_adapter() if hasattr(model, "disable_adapter") else contextlib.nullcontext()
 
     print(f"[distill] sampling teacher: {len(ds)} problems x {cfg.distill_samples_per_problem}")
     groups = batch_generate(
@@ -71,7 +81,7 @@ def build_corpus(cfg: PedRLConfig) -> str:
             continue
         n_any_correct += 1
         # pick the most learnable correct demo under the frozen student
-        with model.disable_adapter():
+        with student_ctx():
             scores = score_completions(
                 model, tokenizer,
                 [ex["student_prompt"]] * len(correct),
@@ -88,7 +98,7 @@ def build_corpus(cfg: PedRLConfig) -> str:
             "mean_logp": scores[best].mean_logp,
         })
 
-    os.makedirs(cfg.output_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(cfg.distill_corpus_path) or ".", exist_ok=True)
     with open(cfg.distill_corpus_path, "w") as f:
         for row in kept:
             f.write(json.dumps(row) + "\n")

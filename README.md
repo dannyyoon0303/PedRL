@@ -92,7 +92,34 @@ between stages):
 
 Compare `outputs/eval_base.json` vs `outputs/eval_student.json`.
 
-Useful variations:
+### Analysis: surprisal & sample efficiency
+
+Two artifacts are produced automatically during training:
+
+- `outputs/reward_log_teacher.jsonl` — per-reward-batch metrics (`acc`,
+  `mean_g`, `mean_gap`, `mean_max_gap`, cumulative `rollouts`). Plot these to
+  see **surprisal decreasing** (and `G_spike` rising) as the teacher trains.
+- `outputs/teacher_adapter_checkpoints/step_*` — adapter snapshots every
+  `checkpoint_every` (default 30) steps.
+
+Then, to measure **how fast eval accuracy improves per rollout** vs vanilla RL:
+
+```bash
+# vanilla GRPO on the student (no privileged info), SAME rollout budget
+python run.py baseline-rl --preset poc
+
+# learning curves: pass@1 vs rollouts -> outputs/curve_baseline.json / curve_pedrl.json
+python run.py curve-baseline --preset poc     # evaluates each baseline checkpoint
+python run.py curve-pedrl --preset poc        # per teacher checkpoint: corpus -> assimilate -> eval
+```
+
+`curve-pedrl` includes a step-0 point (the *untrained* privileged teacher =
+plain rejection-sampling distillation), so the curve isolates what pedagogical
+training of the teacher adds. Curve points use reduced sizes
+(`curve_n_distill=128`, `curve_n_eval=100`) to keep Colab compute sane.
+The notebook plots both analyses.
+
+Other variations:
 
 ```bash
 # SFT ablation (no surprisal gate) — is the gating actually doing work?
@@ -139,17 +166,23 @@ PedRL_colab.ipynb       # Colab driver notebook
 | `num_generations` | 8 | GRPO group size |
 | `teacher_steps` | 120 | GRPO steps for the teacher |
 | `privileged` | `answer` | what the teacher sees: `answer` or `solution` |
+| `checkpoint_every` | 30 | adapter snapshot cadence for learning curves (0 = off) |
+| `curve_n_distill` / `curve_n_eval` | 128 / 100 | reduced sizes for curve points |
 
 GRPO normalizes advantages within each group, so only the *relative* ordering
 of `r_ped` within a group matters — the absolute scale of `λ` is forgiving.
 
 ## What to look for
 
-- **Teacher training logs** (`[reward] acc=… G=… r_ped=…`): accuracy should
-  stay high (it has the answer!) while `G` climbs — the teacher is learning to
-  reach the right answer *along paths the student finds plausible*.
-- **Corpus stats**: `mean G_spike of kept demos` should be higher after teacher
-  training than a pre-training teacher would give.
+- **Surprisal over training** (`reward_log_teacher.jsonl`): `mean_gap` /
+  `mean_max_gap` should fall and `mean_g` rise while `acc` stays high — the
+  teacher already knows the answer; it is learning *how to say it* in a way the
+  student finds plausible.
+- **Sample efficiency** (`curve_pedrl.json` vs `curve_baseline.json`): pass@1
+  as a function of rollouts. The method's claim is that the PedRL curve rises
+  much faster than vanilla GRPO at the same rollout budget.
+- **Corpus stats**: `mean G_spike of kept demos` should be higher for trained
+  teacher checkpoints than for the step-0 (untrained) teacher.
 - **Final comparison**: `eval_student.json` vs `eval_base.json` vs the
   `--no-gating` ablation.
 

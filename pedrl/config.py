@@ -73,20 +73,34 @@ class PedRLConfig:
     eval_max_new_tokens: int = 512
     eval_batch_size: int = 16
 
-    # ---- derived paths ----
-    @property
-    def teacher_adapter_dir(self) -> str:
-        return os.path.join(self.output_dir, "teacher_adapter")
+    # ---- analysis: adapter checkpoints + learning curves ----
+    checkpoint_every: int = 30    # save the GRPO adapter every N steps (0 = off)
+    curve_n_distill: int = 128    # problems per corpus when building the PedRL curve
+    curve_n_eval: int = 100       # eval problems per curve point
+
+    # ---- paths (empty = auto-derived from output_dir in finalize()) ----
+    teacher_adapter_dir: str = ""   # "none" = use the base model as the (untrained) teacher
+    student_adapter_dir: str = ""
+    distill_corpus_path: str = ""
+    eval_adapter_dir: str = ""      # for the eval-adapter stage
+    eval_tag: str = ""              # output name for the eval-adapter stage
+
+    def finalize(self) -> "PedRLConfig":
+        """Fill in any path left empty. Call after all overrides are applied."""
+        if not self.teacher_adapter_dir:
+            self.teacher_adapter_dir = os.path.join(self.output_dir, "teacher_adapter")
+        if not self.student_adapter_dir:
+            # the SFT ablation gets its own directory so it never clobbers the gated student
+            name = "student_adapter" if self.gating else "student_adapter_sft"
+            self.student_adapter_dir = os.path.join(self.output_dir, name)
+        if not self.distill_corpus_path:
+            self.distill_corpus_path = os.path.join(self.output_dir, "distill_corpus.jsonl")
+        return self
 
     @property
-    def student_adapter_dir(self) -> str:
-        # the SFT ablation gets its own directory so it never clobbers the gated student
-        name = "student_adapter" if self.gating else "student_adapter_sft"
-        return os.path.join(self.output_dir, name)
-
-    @property
-    def distill_corpus_path(self) -> str:
-        return os.path.join(self.output_dir, "distill_corpus.jsonl")
+    def rollouts_per_step(self) -> int:
+        """Completions consumed per GRPO optimizer step (single GPU)."""
+        return self.per_device_train_batch_size * self.gradient_accumulation_steps
 
     def save(self, path: str) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -112,5 +126,8 @@ def apply_preset(cfg: PedRLConfig, preset: Optional[str]) -> PedRLConfig:
         cfg.assim_epochs = 1
         cfg.student_rl_steps = 4
         cfg.logging_steps = 1
+        cfg.checkpoint_every = 3
+        cfg.curve_n_distill = 8
+        cfg.curve_n_eval = 10
         return cfg
     raise ValueError(f"unknown preset: {preset}")

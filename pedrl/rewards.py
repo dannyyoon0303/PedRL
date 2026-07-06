@@ -12,6 +12,9 @@ the weights is needed.
 """
 
 import contextlib
+import json
+import os
+import time
 from typing import List, Optional
 
 from .data import answers_match, extract_prediction
@@ -19,13 +22,26 @@ from .surprisal import score_completions
 
 
 class PedagogicalReward:
-    def __init__(self, tokenizer, cfg, pedagogical: bool = True):
+    def __init__(self, tokenizer, cfg, pedagogical: bool = True,
+                 log_path: Optional[str] = None):
         self.__name__ = "pedagogical_reward" if pedagogical else "correctness_reward"
         self.tokenizer = tokenizer
         self.cfg = cfg
         self.pedagogical = pedagogical
         self.model = None  # attached after the trainer builds/prepares the model
+        self.log_path = log_path
         self._n_calls = 0
+        self._n_rollouts = 0
+        self._t0 = time.time()
+
+    def _log(self, record: dict) -> None:
+        """Append one metrics record per reward call — the raw data behind the
+        'surprisal decreases as the teacher trains' plot."""
+        if self.log_path is None:
+            return
+        os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
+        with open(self.log_path, "a") as f:
+            f.write(json.dumps(record) + "\n")
 
     def attach(self, model) -> None:
         """Attach the (PEFT-wrapped) policy model used to score surprisal."""
@@ -48,8 +64,18 @@ class PedagogicalReward:
             1.0 if answers_match(extract_prediction(c), a) else 0.0
             for c, a in zip(completions, answers)
         ]
+        n = len(correct)
+        self._n_calls += 1
+        self._n_rollouts += n
 
         if not self.pedagogical:
+            self._log({
+                "call": self._n_calls,
+                "rollouts": self._n_rollouts,
+                "acc": sum(correct) / n,
+                "mean_reward": sum(correct) / n,
+                "elapsed_s": round(time.time() - self._t0, 1),
+            })
             return correct
 
         if self.model is None:
@@ -79,9 +105,22 @@ class PedagogicalReward:
 
         rewards = [r * s.g for r, s in zip(correct, scores)]
 
-        self._n_calls += 1
+        self._log({
+            "call": self._n_calls,
+            "rollouts": self._n_rollouts,
+            "acc": sum(correct) / n,
+            "mean_g": sum(s.g for s in scores) / n,
+            "mean_gap": sum(s.mean_gap for s in scores) / n,
+            "mean_max_gap": sum(s.max_gap for s in scores) / n,
+            # empty completions carry mean_logp = -inf; keep the log finite
+            "mean_logp": (
+                sum(s.mean_logp for s in scores if s.n_tokens > 0)
+                / max(1, sum(1 for s in scores if s.n_tokens > 0))
+            ),
+            "mean_reward": sum(rewards) / n,
+            "elapsed_s": round(time.time() - self._t0, 1),
+        })
         if self._n_calls % 5 == 1:
-            n = len(rewards)
             print(
                 f"[reward] acc={sum(correct)/n:.2f} "
                 f"G={sum(s.g for s in scores)/n:.3f} "
