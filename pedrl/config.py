@@ -108,6 +108,20 @@ class PedRLConfig:
             json.dump({f_.name: getattr(self, f_.name) for f_ in fields(self)}, f, indent=2)
 
 
+def filter_kwargs_for_dataclass(cls, kwargs: dict, label: str = "") -> dict:
+    """Keep only kwargs that `cls` (a dataclass, e.g. trl.GRPOConfig) accepts.
+    TRL renames/removes config fields across versions; dropping unknown ones
+    keeps us compatible with whatever version Colab installs."""
+    import dataclasses
+
+    valid = {f.name for f in dataclasses.fields(cls)}
+    dropped = sorted(k for k in kwargs if k not in valid)
+    if dropped:
+        print(f"[{label or cls.__name__}] this version does not support "
+              f"{dropped} — dropping")
+    return {k: v for k, v in kwargs.items() if k in valid}
+
+
 def apply_preset(cfg: PedRLConfig, preset: Optional[str]) -> PedRLConfig:
     """Presets: 'smoke' verifies the full pipeline in minutes; 'poc' is the real run."""
     if preset in (None, "poc"):

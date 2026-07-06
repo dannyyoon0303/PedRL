@@ -88,6 +88,11 @@ class PedagogicalReward:
                 self.tokenizer(c, add_special_tokens=False)["input_ids"]
                 for c in completions
             ]
+        else:
+            # some TRL versions pass tensors; normalize to lists of ints
+            completion_ids = [
+                c.tolist() if hasattr(c, "tolist") else list(c) for c in completion_ids
+            ]
 
         was_training = self.model.training
         self.model.eval()

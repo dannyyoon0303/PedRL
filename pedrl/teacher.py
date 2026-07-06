@@ -14,7 +14,7 @@ import os
 from transformers import TrainerCallback
 from trl import GRPOConfig, GRPOTrainer
 
-from .config import PedRLConfig
+from .config import PedRLConfig, filter_kwargs_for_dataclass
 from .data import load_gsm8k
 from .modeling import load_model, load_tokenizer, make_lora_config, pick_dtype, set_seed
 from .rewards import PedagogicalReward
@@ -57,7 +57,7 @@ def train_teacher(cfg: PedRLConfig, pedagogical: bool = True,
     )
 
     dtype = pick_dtype()
-    args = GRPOConfig(
+    args = GRPOConfig(**filter_kwargs_for_dataclass(GRPOConfig, dict(
         output_dir=os.path.join(cfg.output_dir, "grpo_teacher" if pedagogical else "grpo_student"),
         max_steps=max_steps,
         learning_rate=cfg.teacher_lr,
@@ -78,13 +78,14 @@ def train_teacher(cfg: PedRLConfig, pedagogical: bool = True,
         gradient_checkpointing=True,
         lr_scheduler_type="constant_with_warmup",
         warmup_steps=min(10, max(1, max_steps // 10)),
-    )
+    ), label="GRPOConfig"))
 
     callbacks = [AdapterCheckpointCallback(cfg.checkpoint_every, save_dir + "_checkpoints")]
 
     if init_adapter is not None:
         # continue training an existing adapter (stage 3)
-        args.model_init_kwargs = None  # only valid when model is passed as a string
+        if hasattr(args, "model_init_kwargs"):
+            args.model_init_kwargs = None  # only valid when model is passed as a string
         model = load_model(cfg.model_name, adapter_dir=init_adapter, trainable_adapter=True)
         trainer = GRPOTrainer(
             model=model,
