@@ -16,7 +16,7 @@ from trl import GRPOConfig, GRPOTrainer
 
 from .config import PedRLConfig, filter_kwargs_for_dataclass
 from .data import load_gsm8k
-from .modeling import load_model, load_tokenizer, make_lora_config, pick_dtype, set_seed
+from .modeling import dtype_key, load_model, load_tokenizer, make_lora_config, pick_dtype, set_seed
 from .rewards import PedagogicalReward
 
 
@@ -74,7 +74,7 @@ def train_teacher(cfg: PedRLConfig, pedagogical: bool = True,
         seed=cfg.seed,
         bf16=(dtype == torch.bfloat16),
         fp16=(dtype == torch.float16),
-        model_init_kwargs={"torch_dtype": dtype},
+        model_init_kwargs={dtype_key(): dtype},
         gradient_checkpointing=True,
         lr_scheduler_type="constant_with_warmup",
         warmup_steps=min(10, max(1, max_steps // 10)),

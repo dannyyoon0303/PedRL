@@ -5,10 +5,41 @@ from typing import List, Optional
 
 import numpy as np
 import torch
+import transformers
 from peft import LoraConfig, PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 LORA_TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+
+def neutralize_broken_torchao() -> None:
+    """Colab preinstalls an old torchao; recent peft *raises* from
+    is_torchao_available() instead of treating it as unavailable, which crashes
+    LoRA injection. We never use torchao, so make the probe answer False."""
+    try:
+        import peft.import_utils as piu
+        piu.is_torchao_available()
+    except ImportError:
+        piu.is_torchao_available = lambda: False
+        try:
+            import peft.tuners.lora.torchao as plt_torchao
+            plt_torchao.is_torchao_available = lambda: False
+        except Exception:
+            pass
+        print("[modeling] incompatible torchao detected — disabled the peft torchao path")
+    except Exception:
+        pass
+
+
+def dtype_key() -> str:
+    """transformers renamed from_pretrained's torch_dtype -> dtype in 4.56."""
+    try:
+        major, minor = (int(x) for x in transformers.__version__.split(".")[:2])
+        if (major, minor) >= (4, 56):
+            return "dtype"
+    except Exception:
+        pass
+    return "torch_dtype"
 
 
 def set_seed(seed: int) -> None:
@@ -35,10 +66,11 @@ def load_tokenizer(model_name: str):
 
 
 def load_model(model_name: str, adapter_dir: Optional[str] = None, trainable_adapter: bool = False):
+    neutralize_broken_torchao()
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=pick_dtype(),
         device_map="auto" if torch.cuda.is_available() else None,
+        **{dtype_key(): pick_dtype()},
     )
     if adapter_dir is not None:
         model = PeftModel.from_pretrained(model, adapter_dir, is_trainable=trainable_adapter)
@@ -46,6 +78,7 @@ def load_model(model_name: str, adapter_dir: Optional[str] = None, trainable_ada
 
 
 def make_lora_config(cfg) -> LoraConfig:
+    neutralize_broken_torchao()
     return LoraConfig(
         r=cfg.lora_r,
         lora_alpha=cfg.lora_alpha,
