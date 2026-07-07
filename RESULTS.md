@@ -69,4 +69,16 @@ exploit an answer hint via in-context learning).
 
 ## Round 2 — sparse-reward regime (hard preset)
 
-*(pending)*
+**Premise check first** (`probe-hard`, before any training): on the hard set,
+the same base model sampled k times blind vs k times with the hint. The
+method's motivation predicts blind `pass@1 ≈ 0` / near-zero learnable GRPO
+groups, and substantially higher reward density with privilege. If privileged
+sampling *also* starves, the hint form is insufficient → escalate to
+`privileged=solution` before spending the training budget.
+
+| probe (hard train problems) | pass@1 | ≥1 correct/group | mixed (learnable) groups |
+|---|---|---|---|
+| blind (student prompt) | *(pending)* | | |
+| privileged (hint, untrained) | *(pending)* | | |
+
+*(training results pending)*

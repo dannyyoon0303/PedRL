@@ -18,6 +18,8 @@ Presets: smoke (T4 pipeline check) | poc (dense-reward GSM8K, 0.5B) |
 Analysis / baselines:
 
   python run.py filter-hard    [--preset ...]  # screen problems the base student fails at k samples
+  python run.py probe-hard     [--preset ...]  # premise check: reward density blind vs privileged
+                                               # sampling on the hard set (run BEFORE training)
   python run.py baseline-rl    [--preset ...]  # vanilla GRPO on the student, SAME rollout
                                                # budget as the teacher — the sample-efficiency baseline
   python run.py curve-pedrl    [--preset ...]  # eval accuracy vs teacher rollouts: for each teacher
@@ -41,7 +43,7 @@ from pedrl.config import PedRLConfig, apply_preset
 
 STAGES = [
     "eval-base", "teacher", "corpus", "assimilate", "eval-student", "all",
-    "filter-hard", "baseline-rl", "student-rl", "eval-adapter",
+    "filter-hard", "probe-hard", "baseline-rl", "student-rl", "eval-adapter",
     "curve-pedrl", "curve-baseline",
 ]
 
@@ -186,6 +188,11 @@ def run_stage(stage: str, cfg: PedRLConfig):
     elif stage == "filter-hard":
         from pedrl.hardset import build_hard_set
         build_hard_set(cfg)
+    elif stage == "probe-hard":
+        # premise check: blind sampling must starve on the hard set while the
+        # (untrained) privileged sampler finds correct rollouts
+        from pedrl.hardset import probe_hard
+        probe_hard(cfg)
     elif stage == "teacher":
         from pedrl.teacher import train_teacher
         train_teacher(cfg, pedagogical=True)

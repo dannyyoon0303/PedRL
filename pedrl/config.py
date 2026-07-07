@@ -42,6 +42,10 @@ class PedRLConfig:
     hard_test_pool: int = 400     # test problems screened for the held-out hard eval slice
     hard_k: int = 4               # student samples per problem; hard = 0/k correct
     n_eval_hard: int = 100        # eval problems from the hard test slice (capped by availability)
+    # probe-hard: verify the premise — blind sampling must starve on the hard set
+    # while privileged sampling finds correct rollouts (reward density at step 0)
+    probe_n: int = 96             # hard problems probed
+    probe_k: int = 0              # samples per problem/condition; 0 = num_generations
 
     # ---- shared generation ----
     max_prompt_length: int = 512

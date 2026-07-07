@@ -99,6 +99,9 @@ python run.py all --preset poc
 
 # the real test — sparse-reward hard subset on A100
 # (runs filter-hard automatically, writes to outputs_hard/)
+python run.py filter-hard --preset hard
+python run.py probe-hard --preset hard       # premise check BEFORE training: blind sampling
+                                             # must starve while privileged sampling succeeds
 python run.py all --preset hard
 python run.py baseline-rl --preset hard      # vanilla GRPO should STALL here
 python run.py curve-baseline --preset hard   # both curves eval on the hard slice

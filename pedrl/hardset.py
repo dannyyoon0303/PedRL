@@ -66,3 +66,72 @@ def build_hard_set(cfg: PedRLConfig) -> None:
             }, f)
         print(f"[filter-hard] {split}: {len(hard)}/{len(ds)} hard "
               f"(student pass@{cfg.hard_k} = {1 - len(hard)/len(ds):.2f}) -> {out_path}")
+
+
+def probe_hard(cfg: PedRLConfig) -> dict:
+    """The motivation check, run BEFORE training: on the hard problems, sample the
+    same base model k times blind (student prompt) and k times privileged
+    (hint prompt, untrained). GRPO's learning signal exists only in groups with
+    reward variance, so we report, per condition:
+
+      pass@1         — per-sample accuracy (reward density)
+      any_correct    — fraction of k-sample groups with >=1 correct rollout
+      mixed_groups   — fraction with 0 < n_correct < k (nonzero advantage under
+                       binary reward: the groups vanilla GRPO can learn from)
+
+    The premise holds if blind numbers are ~0 while privileged numbers are
+    substantially higher. Writes <output_dir>/probe.json.
+    """
+    set_seed(cfg.seed)
+    k = cfg.probe_k or cfg.num_generations
+    tokenizer = load_tokenizer(cfg.model_name)
+    ds = load_gsm8k(cfg, tokenizer, split="train", n=cfg.probe_n,
+                    filter_path=cfg.hard_train_path)
+    model = load_model(cfg.model_name)  # base model, no training in either condition
+    model.eval()
+
+    results = {"n": len(ds), "k": k, "model": cfg.model_name, "conditions": {}}
+    for cond, column in [("blind", "student_prompt"), ("privileged", "prompt")]:
+        print(f"[probe] sampling {cond}: {len(ds)} hard problems x {k} "
+              f"(temp={cfg.grpo_temperature}, mirroring GRPO)")
+        groups = batch_generate(
+            model,
+            tokenizer,
+            list(ds[column]),
+            max_new_tokens=cfg.max_completion_length,
+            batch_size=cfg.gen_batch_size,
+            temperature=cfg.grpo_temperature,
+            top_p=cfg.distill_top_p,
+            num_return_sequences=k,
+        )
+        n_correct_total, n_any, n_mixed = 0, 0, 0
+        for ex, group in zip(ds, groups):
+            nc = sum(answers_match(extract_prediction(g["text"]), ex["answer"]) for g in group)
+            n_correct_total += nc
+            n_any += nc > 0
+            n_mixed += 0 < nc < k
+        results["conditions"][cond] = {
+            "pass1": n_correct_total / (len(ds) * k),
+            "any_correct": n_any / len(ds),
+            "mixed_groups": n_mixed / len(ds),
+        }
+
+    out_path = os.path.join(cfg.output_dir, "probe.json")
+    os.makedirs(cfg.output_dir, exist_ok=True)
+    with open(out_path, "w") as f:
+        json.dump(results, f, indent=2)
+
+    print(f"\n[probe] reward density on {len(ds)} hard problems, {k} samples each:")
+    for cond, r in results["conditions"].items():
+        print(f"  {cond:>11}: pass@1={r['pass1']:.3f}  "
+              f">=1 correct in group={r['any_correct']:.2f}  "
+              f"mixed (learnable) groups={r['mixed_groups']:.2f}")
+    blind = results["conditions"]["blind"]
+    priv = results["conditions"]["privileged"]
+    if priv["any_correct"] > 2 * blind["any_correct"] and blind["mixed_groups"] < 0.2:
+        print("[probe] PREMISE HOLDS: blind sampling starves, privilege finds rollouts")
+    else:
+        print("[probe] PREMISE WEAK: check RESULTS.md round-1 diagnosis — consider "
+              "--set privileged=solution or a different hint prompt")
+    print(f"-> {out_path}")
+    return results
