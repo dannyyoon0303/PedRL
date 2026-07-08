@@ -4,6 +4,16 @@ A compact, Colab-friendly implementation of **Pedagogical RL**
 ([blog post by Noah Ziems](https://noahziems.com/pedagogical-rl)), with code
 patterns borrowed from [OPSD](https://github.com/siyan-zhao/OPSD).
 
+> **Debugging variant:** [PedRL_debug/](PedRL_debug/README.md) ports the same
+> recipe to DebugBench bug fixing, where the privileged information is a
+> *witness* (the bug explanation) — a domain where the reversal
+> (witness → fix) should be far easier than the blind search, unlike math.
+>
+> **Witness test for math:** [pedrl/witness_math.ipynb](pedrl/witness_math.ipynb)
+> checks the converse on recent AIME (2024+2025): blind vs answer-hinted pass@1,
+> LLM-judged legitimacy of the rescues, and token-level witness-effect heatmaps —
+> the direct comparison partner of `PedRL_debug`'s `probe` stage.
+
 ## The idea
 
 On-policy RL is sample-inefficient because the sampler "explores as if it is

@@ -1,5 +1,10 @@
 __pycache__/
 *.pyc
 outputs/
+outputs_hard/
+outputs_debug/
+outputs_debug_hard/
+outputs_witness_math/
+PedRL_debug/verified_debugbench.json
 venv/
 .DS_Store
