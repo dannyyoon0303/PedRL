@@ -118,6 +118,63 @@ information:
   31 · 3 · 1/13 = 93/13, m+n = 106. Complete and correct (the only problem with two legitimate
   samples).
 
+---
+
+# Part 2 — token-level surprisal of the rescues (`pedrl/surprisal_math.ipynb`)
+
+All 36 rescuing solutions scored token-by-token under the frozen student:
+`d_t = log p(argmax) − log p(actual)` under the blind prompt, and the witness effect
+`Δd_t = d_t(blind) − d_t(hinted)`.
+
+![surprisal heatmaps](assets/surprisal_heatmaps.png)
+
+![positions and G_spike](assets/surprisal_positions_gspike.png)
+
+## The backfill signature is a vertical stripe at the box
+
+- For **backfills**, the witness effect concentrates almost entirely on the asserted answer:
+  mean `Δd_t` within ±25 tokens of `\boxed{}` is **0.287 nats vs 0.007 elsewhere (42×)**;
+  49% of each solution's top-5 witness spikes are box-adjacent (legitimate: **0%**); the largest
+  spike sits at mean relative position **0.94** — 29/31 in the final tenth of the solution.
+  The spike tokens are literally the answer digits (73/155 top spike tokens contain digits), e.g.
+  2024-63#0: `\boxed{` → `3` (Δ=4.1), `8` (8.3), `5` (8.9) right after the model's own count
+  concluded 8.
+- For **legitimate** solutions the box is *entailed*: `Δd_t` at the box is ≈ 0. Their blind
+  surprisal is also 3.5× lower overall (mean `d_t` 0.032 vs 0.113) — real derivations are more
+  on-policy for the student everywhere, not just at the answer.
+
+## The most informative token in the dataset is not a lie
+
+The single largest witness effect anywhere (Δd_t = **14.0 nats**, blind 14 → hinted **0.00**) is
+in *legitimate* 2025-3#0, on the token `However` right after "51 + 67 = 118":
+
+> "Adding the number of solutions from both cases, we get: 51 + 67 = 118. **However**, we need to
+> check if there is any overlap. … 118 − 1 = 117."
+
+The blind student would have boxed 118. Knowing the answer is 117 is exactly what makes the
+overlap-correction turn predictable — the one clean case in 36 solutions where the witness
+injected genuine mathematical information rather than just the final digits.
+
+## `G_spike` is not an implicit judge
+
+`G_spike` (β=5, λ=0.5) ranks the legitimate solutions **1, 2, 5 — and 36 of 36**. The last-place
+legitimate solution is precisely 2025-3#0: its 14-nat insight fork looks identical, to a
+spike-detector, to a backfill's asserted digits. Meanwhile three smooth backfills (2024-86#0,
+2024-75#0, 2024-76#0 — fluent prose whose final assertion is the only alien part) score above
+0.27, inside the legitimate cluster.
+
+**Implication for PedRL in math:** `correctness × G_spike` would *distill the backfills*. Echoed
+answers pass the correctness check, smooth backfills pass the learnability check, and the one
+demonstration carrying real information is punished hardest — the surprisal filter cannot
+distinguish "implausible because it's a lie" from "implausible because it's the insight". This is
+a sharper diagnosis than reward sparsity for why the math PoC stalls, and it is exactly what the
+debugging variant fixes structurally: with executable tests, echoing the buggy code scores 0, the
+backfill channel is closed, and `G_spike` is left arbitrating style — its proper job.
+
+**A cheap backfill detector falls out of the analysis:** flag solutions whose top witness-effect
+spikes are box-adjacent (share > ~0.2). On this data it separates backfills from legitimate
+rescues perfectly (0.49 vs 0.00) and needs no judge — only one extra forward pass per demo.
+
 ## Reading
 
 For AIME-level math, the witness converts almost nothing: the model cannot walk backwards from an
