@@ -13,6 +13,9 @@ patterns borrowed from [OPSD](https://github.com/siyan-zhao/OPSD).
 > checks the converse on recent AIME (2024+2025): blind vs answer-hinted pass@1,
 > LLM-judged legitimacy of the rescues, and token-level witness-effect heatmaps —
 > the direct comparison partner of `PedRL_debug`'s `probe` stage.
+> **Result (Qwen2.5-7B, k=8): the hint's raw rescue ratio 0.43 collapses to 0.06
+> after judging — 31/36 rescuing solutions are answer backfills.** Judged
+> examples: [WITNESS_MATH_EXAMPLES.md](WITNESS_MATH_EXAMPLES.md).
 
 ## The idea
 
